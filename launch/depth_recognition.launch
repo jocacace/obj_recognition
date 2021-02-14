@@ -1,0 +1,13 @@
+<?xml version="1.0" ?>
+
+<launch>
+	<rosparam command="load" file="$(find obj_recognition)/conf/recognition.yaml" />
+	<!--
+	<node pkg="obj_recognition" name="obj_recognition" type="obj_recognition" output="screen">
+	</node>
+	-->
+
+	<node pkg="obj_recognition" name="img_obj_recognition" type="img_obj_recognition" output="screen">
+	</node>
+
+</launch>
