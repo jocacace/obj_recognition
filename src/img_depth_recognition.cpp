@@ -25,56 +25,128 @@
 #include <ros/package.h>
 #include "opencv2/highgui/highgui.hpp"
 #include "opencv2/imgproc/imgproc.hpp"
+#include <filesystem>
+#include <iostream>
+
+#include <opencv2/core/core.hpp>
+#include <opencv2/features2d/features2d.hpp>
+#include <opencv2/highgui/highgui.hpp>
+#include "std_msgs/Bool.h"
+#include "obj_recognition/recognized_object.h"
 
 #define WHILE_LOOP              (0)
 
-std::mutex mtx;           // Dichiaro il mutex (come variabile globale)
+std::mutex mtx;         
 
 using namespace std;
 using namespace cv;
 
-typedef pcl::PointXYZ PointType;
-typedef pcl::Normal NormalType;
-typedef pcl::ReferenceFrame RFType;
-typedef pcl::SHOT352 DescriptorType;
-
+namespace fs = std::filesystem;
 
 class OBJ_DETECTION {
+
     public: 
         OBJ_DETECTION();
         void run();
-        void cloudCB(const sensor_msgs::PointCloud2& input);
-        void recognition();
-        void save_ds();
-        void depth_cb( sensor_msgs::ImageConstPtr depth );
+
+        //Main functions
         void td2d();
+        void save_ds();
+
+        //callbacks
+        void depth_cb( sensor_msgs::ImageConstPtr depth );
+        void cloudCB(const sensor_msgs::PointCloud2& input);
+        void cam_parameters( sensor_msgs::CameraInfo );
+        void start_cb( std_msgs::Bool );
+        void stop_cb( std_msgs::Bool );
+        void reset_cb( std_msgs::Bool );
 
     private:
+
         ros::NodeHandle _nh;
+        
+        //---Input sub
         ros::Subscriber _depth_sub;
+        ros::Subscriber _camera_info_sub;
         ros::Subscriber _depth_img_sub;
+        ros::Subscriber _start_recognition_sub;
+        ros::Subscriber _stop_recognition_sub;
+        ros::Subscriber _reset_recognition_sub; //??we need this?
+        //---
+
+        //output
+        ros::Publisher _recognized_obj_pub;
+
         pcl::PointCloud<pcl::PointXYZ> _cloud;
-        bool _first_cloud;
-        string _dataset_path;
-        bool _depth_ready;
-        bool _save_ds;
-        double _ss;
-        double _descr_rad;
-        double _cg_size;
-        double _cg_thresh;
-        Mat _depth_src;
            
+        //---Flags
+        bool _cam_info_first;
+        bool _first_cloud;
+        bool _depth_ready;
+        bool _start_recognition;
+        bool _stop_recognition;
+        bool _reset_recognition;
+        //---
+
+        //---camera parameters
+        cv::Mat *_cam_cameraMatrix, *_cam_distCo, *_cam_R, *_cam_P;
+        //---
+     
+        Mat _depth_src;
+     
+        //---Parameters
+        string _points_topic;
+        string _depth_topic;
+        string _info_topic;
+        bool _save_ds;
+        string _dataset_path;
+        double _camera_frame_rate;
+        double _s;
+        int _rate;
+        int _detection_itr_threshold;
+        double _detection_threshold;
+        int _cycle_itr_threshold;
+        //---
              
 };
 
 
 OBJ_DETECTION::OBJ_DETECTION() {
-    _depth_sub = _nh.subscribe("/camera/depth_registered/points", 1, &OBJ_DETECTION::cloudCB, this);
-    _depth_img_sub = _nh.subscribe( "/camera/aligned_depth_to_color/image_raw", 1, &OBJ_DETECTION::depth_cb, this );
-    _first_cloud = false;
 
 
-    //Load params
+    if( !_nh.getParam("points_topic", _points_topic) ) {
+        _points_topic =  "/camera/depth_registered/points";
+    }
+    if( !_nh.getParam("depth_topic", _depth_topic) ) {
+        _depth_topic =  "/camera/aligned_depth_to_color/image_raw";
+    }
+    if( !_nh.getParam("info_topic", _info_topic) ) {
+        _info_topic =  "/camera/aligned_depth_to_color/camera_info";
+    }
+
+    if( !_nh.getParam("camera_framerate", _camera_frame_rate )) {
+        _camera_frame_rate = 15.0;
+    }
+    if ( !_nh.getParam("s", _s) ) {
+        _s = 2.0;
+    }
+    if ( !_nh.getParam( "rate", _rate )) {
+        _rate = 15;
+    }
+    if ( !_nh.getParam("detection_itr_threshold", _detection_itr_threshold)) {
+        _detection_itr_threshold = 10;
+    }
+
+    _depth_sub = _nh.subscribe( _points_topic.c_str(), 1, &OBJ_DETECTION::cloudCB, this);
+    _depth_img_sub = _nh.subscribe( _depth_topic.c_str(), 1, &OBJ_DETECTION::depth_cb, this );
+    _camera_info_sub = _nh.subscribe( _info_topic.c_str(), 1, &OBJ_DETECTION::cam_parameters, this );
+
+    _start_recognition_sub = _nh.subscribe( "/obj_recognition/start", 1, &OBJ_DETECTION::start_cb, this);
+    _stop_recognition_sub = _nh.subscribe( "/obj_recognition/start", 1, &OBJ_DETECTION::stop_cb, this);
+    _reset_recognition_sub = _nh.subscribe( "/obj_recognition/start", 1, &OBJ_DETECTION::reset_cb, this); //Do we need this?
+    _recognized_obj_pub = _nh.advertise< obj_recognition::recognized_object >("/obj_recognition/recognized", 1);
+    
+    //---Load params
     string dataset_name;
     if( !_nh.getParam("dataset_name", dataset_name) ) {
         dataset_name =  "TESTBED";
@@ -83,28 +155,90 @@ OBJ_DETECTION::OBJ_DETECTION() {
     if( !_nh.getParam("save_ds", _save_ds) ) {
         _save_ds =  false;
     }
-
-
-    if( !_nh.getParam("ss", _ss) ) {
-        _ss =  0.01;
+    if( !_nh.getParam("detection_threshold", _detection_threshold )) {
+        _detection_threshold = 0.05; //Score
     }
-    if( !_nh.getParam("desc_rad", _descr_rad) ) {
-        _descr_rad =  0.1;
+    if( !_nh.getParam("cycle_itr_threshold", _cycle_itr_threshold)) {
+        _cycle_itr_threshold = 100;
     }
-    if( !_nh.getParam("cg_size", _cg_size) ) {
-        _cg_size =  0.015;
-    }
-    if( !_nh.getParam("cg_thresh", _cg_thresh) ) {
-        _cg_thresh =  5.0;
-    }
-
-
+    //---
+    
     _dataset_path = ros::package::getPath("obj_recognition");
-    _dataset_path = _dataset_path + "/DATASET/TESTBED/";
+    _dataset_path = _dataset_path + "/DATASET/" + dataset_name + "/";
     _depth_ready = false;
+    _cam_info_first = true;
+    _start_recognition = false;
+    _stop_recognition = false;
+    _reset_recognition = false;
+    _first_cloud = false;
+    _cycle_itr_threshold = 0;
+
 }
 
+void OBJ_DETECTION::start_cb( std_msgs::Bool s ) {
+    _start_recognition = s.data;
+}
+void OBJ_DETECTION::stop_cb( std_msgs::Bool s ) {
+    _stop_recognition = s.data;
+}
+void OBJ_DETECTION::reset_cb( std_msgs::Bool res) {    
+    _reset_recognition = res.data;
+}
 
+//save camera parameters in openCV structs
+void OBJ_DETECTION::cam_parameters( sensor_msgs::CameraInfo camera_info) {
+
+    /*
+     *  ROS topic data
+     *  K = cameraMatrix
+     *  D = distCoeffs
+     *  R = Rettification
+     *  P = Projection
+     */
+
+
+    if( _cam_info_first == true ) {
+
+        ROS_INFO("Start camera parameters initialization...");
+        //---resize calibration matrix
+        _cam_cameraMatrix = new cv::Mat(3, 3, CV_64FC1);
+        _cam_distCo = new cv::Mat(1, 5, CV_64FC1);
+        _cam_R = new cv::Mat(3, 3, CV_64FC1);
+        _cam_P = new cv::Mat(3, 4, CV_64FC1);
+        //---
+
+        //---K
+        for(int i=0; i<3;i++) {
+            for(int j=0; j<3; j++) {
+                _cam_cameraMatrix->at<double>(i,j) = camera_info.K[3*i+j];
+
+                cout << "[" << i << ", " << j << "]: " << _cam_cameraMatrix->at<double>(i,j) << endl;
+            }
+        }
+        //---D
+				if( camera_info.D.size() >= 5 ) {
+	        for(int i=0; i<5;i++) {
+            _cam_distCo->at<double>(0,i) = camera_info.D[i];
+  	      }
+				}
+        //---R
+        for(int i=0; i<3;i++) {
+            for(int j=0; j<3; j++) {
+                _cam_R->at<double>(i,j) = camera_info.R[3*i+j];
+            }
+        }
+        //---P
+        for(int i=0; i<3;i++) {
+            for(int j=0; j<4; j++) {
+                _cam_P->at<double>(i,j) = camera_info.P[4*i+j];
+            }
+        }
+        _cam_info_first = false;
+
+        ROS_INFO("...camera parameters initialization complete!");
+    }
+
+}
 
 void OBJ_DETECTION::cloudCB(const sensor_msgs::PointCloud2& input) {
     pcl::fromROSMsg(input, _cloud);
@@ -132,10 +266,257 @@ void OBJ_DETECTION::depth_cb( sensor_msgs::ImageConstPtr depth ) {
     mtx.unlock();
 }
 
+void tokenize(string &str, char delim, vector<string> &out) {
+	size_t start;
+	size_t end = 0;
+
+	while ((start = str.find_first_not_of(delim, end)) != string::npos) {
+		end = str.find(delim, start);
+		out.push_back(str.substr(start, end - start));
+	}
+}
 
 void OBJ_DETECTION::td2d() {
 
+    //---Wait input data: they must be a continous stream
     while( !_depth_ready ) {
+        usleep(0.1*1e6);
+    }
+    ROS_INFO("Depth data arrived!");
+
+    while ( !_first_cloud ) {
+        usleep(0.1*1e6);
+    }
+    ROS_INFO("PointCloud data arrived!");
+   
+    while( _cam_info_first ) {
+        usleep(0.1*1e6);
+    }
+    ROS_INFO("CameraInfo data arrived!");
+    //---
+
+    ros::Rate r(_rate);
+
+    double cx, cy, fx_inv, fy_inv;
+    double zd_c1;    
+    double cx_c1, cy_c1, cz_c1;
+
+    int dilation_size = 5;
+    int dilation_type = 1;
+    int dilation_elem = 1;
+    if( dilation_elem == 0 ){ dilation_type = MORPH_RECT; }
+    else if( dilation_elem == 1 ){ dilation_type = MORPH_CROSS; }
+    else if( dilation_elem == 2) { dilation_type = MORPH_ELLIPSE; }
+    Mat element = getStructuringElement( dilation_type,
+                        Size( 2*dilation_size + 1, 2*dilation_size+1 ),
+                        Point( dilation_size, dilation_size ) );
+
+ 
+    while( ros::ok() ) {
+
+        string p_piece = "";
+        pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>);
+
+        Mat depth;
+        pcl::PassThrough<pcl::PointXYZ> pass;
+        pass.setInputCloud (_cloud.makeShared());
+
+        vector< double > min_dist;
+        int min_itr = 0;
+        int cycle_itr = 0;
+
+        bool min_found = false;
+        double min_cloud = 0.0;
+        bool first_cnt = false;
+        bool first = true;  
+        int pieces_itr = 0;     
+
+        mtx.lock();
+        _depth_src.copyTo(depth);
+        cv::Mat contourImage(depth.size(), CV_8UC3, cv::Scalar(0,0,0)); 
+        mtx.unlock();      
+        cv::Scalar colors;
+        colors = cv::Scalar(255, 255, 255);
+        bool _recognition_done = false;
+
+        //Wait for a signal?
+        string ll;
+        getline(cin, ll);
+
+        while( !_recognition_done /*&& !_stop_recognition*/ ) {
+
+            if ( !min_found ) {
+            
+                while( min_itr < _s*_camera_frame_rate ) {
+                    kdtree.setInputCloud (_cloud.makeShared());
+                    std::vector<int> nn_indices (1);
+                    std::vector<float> nn_dists (1);
+                    kdtree.nearestKSearch(pcl::PointXYZ(0, 0, 0), 1, nn_indices, nn_dists);
+
+                    if( !isnan( _cloud.points[nn_indices[0]].z ) ) {
+                        min_dist.push_back( _cloud.points[nn_indices[0]].z );
+                        min_itr++;
+                    }
+                }
+
+                double nmin = 0.0;
+                for(int i=0; i<min_dist.size(); i++) {
+                    nmin += min_dist[i];
+                }
+                nmin /= min_dist.size();
+
+                min_cloud = 0.0;
+                int norma_size = 0;
+
+                for(int i=0; i<min_dist.size(); i++) {
+                    if( min_dist[i] <= nmin ) {
+                        min_cloud += min_dist[i];
+                        norma_size++;
+                    } 
+                }
+
+                min_cloud /= norma_size;
+
+                min_found = true;
+            } //Searching for the minimum value
+            else cout << "Non cerco piu il min!" << endl;
+            mtx.lock();
+            _depth_src.copyTo(depth);
+            mtx.unlock();      
+
+            Mat img(depth.rows, depth.cols, CV_8UC1, Scalar(0));
+            double z_min = min_cloud;
+                
+            for(int i=0; i<depth.rows; i++) {
+                for(int j=0; j<depth.cols; j++)  {
+                    float d = depth.at<float>(i,j);
+                    d*= 0.001;
+                    if(  ( ( d ) >=  z_min - 0.03)  && (( d ) <= z_min + 0.03 ) ) {
+                        img.at<char>(i,j) = 255; 
+                    }    
+                }
+            }
+
+            Mat dilation_dst;
+            dilate( img, dilation_dst, element );        
+            cv::Mat contour1Image(depth.size(), CV_8UC3, cv::Scalar(0,0,0)); 
+            std::vector<std::vector<cv::Point> > contours1;
+            cv::Mat contour1Output = dilation_dst.clone();
+            cv::findContours( contour1Output, contours1, CV_RETR_LIST, CV_CHAIN_APPROX_NONE );
+            
+            for (size_t idx = 0; idx < contours1.size(); idx++) {
+                cv::drawContours(contour1Image, contours1, idx, colors);
+            }
+            Mat dst1;
+            cvtColor(contour1Image, dst1, cv::COLOR_BGR2GRAY);
+
+            vector< string > pieces;
+            vector< double > scores;
+            for (const auto & entry : fs::directory_iterator(_dataset_path)) {
+                string p = entry.path();
+                contourImage = imread(p, IMREAD_COLOR);
+
+                vector<string> a;
+                vector<string> b;
+                tokenize(p,'/',a);
+                tokenize(a[ a.size()-1 ],'_', b);                
+                pieces.push_back( b[ 0 ] );
+                
+                Mat dst;
+                cvtColor(contourImage, dst, cv::COLOR_BGR2GRAY);
+
+                double d1 = matchShapes(dst, dst1, CONTOURS_MATCH_I1, 0);
+
+                scores.push_back(d1);
+            }
+
+            int index = -1;
+            double min_score = 1000;
+            for(int i=0; i<scores.size(); i++ ) {
+                if( min_score > scores[i] ) {
+                    min_score = scores[i];
+                    index = i;
+                }
+            }
+        
+            vector<vector<Point> > contours_poly( contours1.size() );
+            vector<Rect> boundRect( contours1.size() );
+            vector<Point2f>centers( contours1.size() );
+            vector<float>radius( contours1.size() );
+            
+            for( size_t i = 0; i < contours1.size(); i++ ) {
+                approxPolyDP( contours1[i], contours_poly[i], 3, true );
+                boundRect[i] = boundingRect( contours_poly[i] );
+            }
+            
+            for( size_t i = 0; i< contours1.size(); i++ ) {
+                drawContours( dst1, contours_poly, (int)i, colors );
+                rectangle( dst1, boundRect[i].tl(), boundRect[i].br(), colors, 2 );
+            }
+            
+            //We want t o detect only 1 shape... it this true?            
+            if( boundRect.size() == 1 ) {
+                if( pieces[index] == p_piece ) {
+                    pieces_itr++;
+                }
+                else {
+                    p_piece = pieces[index];
+                    pieces_itr = 0;
+                }
+            }
+
+
+            if( pieces_itr >= _detection_itr_threshold ) {           
+                Point center_of_rect = (boundRect[0].br() + boundRect[0].tl())*0.5;
+                circle( dst1, center_of_rect, 3, colors, 2 );        
+
+                cx = _cam_cameraMatrix->at<double>(0,2);
+                cy = _cam_cameraMatrix->at<double>(1,2);
+                fx_inv = 1.0 / _cam_cameraMatrix->at<double>(0,0);
+                fy_inv = 1.0 / _cam_cameraMatrix->at<double>(1,1);
+                zd_c1 = depth.at<float>( center_of_rect.y, center_of_rect.x );
+                zd_c1 *= 0.001;
+                cx_c1 = (zd_c1) * ( (center_of_rect.x - cx) * fx_inv );
+                cy_c1 = (zd_c1) * ( (center_of_rect.y - cy) * fy_inv );
+                cz_c1 = zd_c1;
+
+                cout << "3d Point: (" << cx_c1 << ", " << cy_c1 << ", " << cz_c1 << ")" << endl; 
+
+                cout << "Pezzo: " << pieces[index] << " - " << scores[index] << endl;
+                string text = pieces[index] + " (" + to_string(cx_c1) + ", " + to_string(cy_c1) + ", " + to_string( cz_c1 ) + ")";
+                cv::putText(dst1, //target image
+                    text, //text
+                    cv::Point(10, img.rows / 6), //top-left position
+                    cv::FONT_HERSHEY_TRIPLEX,
+                    0.5,
+                    colors, //font color
+                    1);
+
+                imshow( "Contours", dst1 );
+                waitKey(100);
+
+                _recognition_done = true;
+            
+            }
+            cycle_itr++;
+            if ( cycle_itr > _cycle_itr_threshold ) {
+                cycle_itr = 0;
+                min_found = false;
+            }
+            r.sleep();
+        }
+        //r.sleep();
+
+    }
+}
+
+
+
+//TODO: fix: image is not updated
+void OBJ_DETECTION::save_ds () {
+
+   while( !_depth_ready ) {
         usleep(0.1*1e6);
     }
     while ( !_first_cloud ) {
@@ -143,35 +524,34 @@ void OBJ_DETECTION::td2d() {
     }
     
     pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>);
     ros::Rate r(15);
 
-    
-    Mat depth;
-    
+    Mat depth;    
     pcl::PassThrough<pcl::PointXYZ> pass;
     pass.setInputCloud (_cloud.makeShared());
 
-    vector< double > min_dist;
-    int min_itr = 0;
     int s = 2;
-    bool min_found = false;
-    double min_cloud = 0.0;
-    bool first_cnt = false;
 
 
-    bool first = true;       
+    string ln;
+    ln = "";
 
-    mtx.lock();
-        _depth_src.copyTo(depth);
-        cv::Mat contourImage(depth.size(), CV_8UC3, cv::Scalar(0,0,0)); 
-    mtx.unlock();      
+    while ( ln != "e" ) {      
 
+        cout << "Save dataset function. Press s to save a new 3d Model, press e to exit" << endl;
+        getline(cin, ln);
 
-    while(ros::ok()) {
+        if( ln == "e" ) exit(1);
 
-        while( min_itr < s*15 ) {
+        vector< double > min_dist;
+        int min_itr = 0;
+        bool min_found = false;
+        double min_cloud = 0.0;
+        bool first_cnt = false;
+
+      
+        while( min_itr < _s*_camera_frame_rate ) {
             kdtree.setInputCloud (_cloud.makeShared());
             std::vector<int> nn_indices (1);
             std::vector<float> nn_dists (1);
@@ -182,512 +562,106 @@ void OBJ_DETECTION::td2d() {
                 min_itr++;
             }
         }
-
-        if ( !min_found ) {
-        
-            double nmin = 0.0;
-            for(int i=0; i<min_dist.size(); i++) {
-                nmin += min_dist[i];
-            }
-            nmin /= min_dist.size();
-
-            cout << "nmin: " << nmin << endl;
-            min_cloud = 0.0;
-            int norma_size = 0;
-
-            for(int i=0; i<min_dist.size(); i++) {
-                if( min_dist[i] <= nmin ) {
-                    min_cloud += min_dist[i];
-                    norma_size++;
-                } 
-            }
-
-            min_cloud /= norma_size;
-            cout << "min_coud: " << min_cloud << endl;
-            min_found = true;
-        }
-        //else {
-            mtx.lock();
-            _depth_src.copyTo(depth);
-            mtx.unlock();      
-            Mat img(depth.rows, depth.cols, CV_8UC1, Scalar(0));
-
-            double z_min = min_cloud;
-            
-
-        
-            //pass.setFilterFieldName ("z");
-            //pass.setFilterLimits (_cloud.points[nn_indices[0]].z - 0.02, _cloud.points[nn_indices[0]].z + 0.02);
-            //pass.filter (*cloud_filtered);
-
-            for(int i=0; i<depth.rows; i++) {
-                for(int j=0; j<depth.cols; j++)  {
-                    float d = depth.at<float>(i,j);
-                    d*= 0.001;
-                    if(  ( ( d ) >=  z_min - 0.03)  && (( d ) <= z_min + 0.03 ) ) {
-                        //cout << i << " - " << j << endl;
-                        img.at<char>(i,j) = 255; //.at<int>(i, j) = 0;
-                    }    
-                }
-                //cout << endl;
-            }
-            Mat dilation_dst;
-            int dilation_size = 5;
-            int dilation_type = 1;
-            int dilation_elem = 1;
-            if( dilation_elem == 0 ){ dilation_type = MORPH_RECT; }
-            else if( dilation_elem == 1 ){ dilation_type = MORPH_CROSS; }
-            else if( dilation_elem == 2) { dilation_type = MORPH_ELLIPSE; }
-            Mat element = getStructuringElement( dilation_type,
-                                Size( 2*dilation_size + 1, 2*dilation_size+1 ),
-                                Point( dilation_size, dilation_size ) );
-            dilate( img, dilation_dst, element );
-
-            cv::Mat invSrc =  cv::Scalar::all(255) - dilation_dst;
-            //imshow("depth", invSrc);
-            //waitKey(100);        
-            
-            
-            /*
-            Mat dst, cdst, cdstP;
-            // Edge detection
-            Canny(dilation_dst, dst, 50, 200, 3);
-            // Copy edges to the images that will display the results in BGR
-            cvtColor(dst, cdst, COLOR_GRAY2BGR);
-            cdstP = cdst.clone();
-            
-            // Standard Hough Line Transform
-            vector<Vec2f> lines; // will hold the results of the detection
-            HoughLines(dst, lines, 1, CV_PI/180, 150, 0, 0 ); // runs the actual detection
-            // Draw the lines
-            for( size_t i = 0; i < lines.size(); i++ )
-            {
-                float rho = lines[i][0], theta = lines[i][1];
-                Point pt1, pt2;
-                double a = cos(theta), b = sin(theta);
-                double x0 = a*rho, y0 = b*rho;
-                pt1.x = cvRound(x0 + 1000*(-b));
-                pt1.y = cvRound(y0 + 1000*(a));
-                pt2.x = cvRound(x0 - 1000*(-b));
-                pt2.y = cvRound(y0 - 1000*(a));
-                line( cdst, pt1, pt2, Scalar(0,0,255), 3, LINE_AA);
-            }
-            // Probabilistic Line Transform
-            vector<Vec4i> linesP; // will hold the results of the detection
-            HoughLinesP(dst, linesP, 1, CV_PI/180, 50, 50, 10 ); // runs the actual detection
-            // Draw the lines
-            for( size_t i = 0; i < linesP.size(); i++ )
-            {
-                Vec4i l = linesP[i];
-                line( cdstP, Point(l[0], l[1]), Point(l[2], l[3]), Scalar(0,0,255), 3, LINE_AA);
-            }
-
-            imshow("Detected Lines (in red) - Standard Hough Line Transform", cdstP);
-            waitKey(100);
-            */
-
-
-
-            if( first ) {
-            
-                std::vector<std::vector<cv::Point> > contours;
-
-                cv::Mat contourOutput = dilation_dst.clone();
-                cv::findContours( contourOutput, contours, CV_RETR_LIST, CV_CHAIN_APPROX_NONE );
-
-                //Draw the contours
-                //cv::Mat contourImage(invSrc.size(), CV_8UC3, cv::Scalar(0,0,0));
-                cv::Scalar colors;
-                colors = cv::Scalar(255, 255, 255);
-                for (size_t idx = 0; idx < contours.size(); idx++) {
-                    cv::drawContours(contourImage, contours, idx, colors);
-                }
-
-                //Mat dst;
-                //threshold( contourImage, dst, 125, 255, 3 );
-    
-                //cv::imshow("Contours", contourImage);
-                //cv::waitKey(100);
-
-                /* 
-                */
-
-                /*
-                for(int i=0;i<contours1.size();i++)
-                {
-                    ans = matchShapes(contours1[i],contours2[i],CV_CONTOURS_MATCH_I1,0);
-                    std::cout<<ans<<" ";
-                    getchar();
-                }
-                */
-                first = false;
-            }
-            else {
-
-                cv::Mat contour1Image(depth.size(), CV_8UC3, cv::Scalar(0,0,0)); 
-
-                std::vector<std::vector<cv::Point> > contours1;
-
-                cv::Mat contour1Output = dilation_dst.clone();
-                cv::findContours( contour1Output, contours1, CV_RETR_LIST, CV_CHAIN_APPROX_NONE );
-
-                //Draw the contours
-                //cv::Mat contourImage(invSrc.size(), CV_8UC3, cv::Scalar(0,0,0));
-                cv::Scalar colors;
-                colors = cv::Scalar(255, 255, 255);
-                for (size_t idx = 0; idx < contours1.size(); idx++) {
-                    cv::drawContours(contour1Image, contours1, idx, colors);
-                }
-
-
-                Mat dst;
-                Mat dst1;
-                //threshold( contourImage, dst, 125, 255, 3 );
-
-                cv::imshow("Contours", contour1Image);
-                cv::waitKey(100);
-
-
-
-
-
-                cvtColor(contourImage, dst, cv::COLOR_BGR2GRAY);
-                cvtColor(contour1Image, dst1, cv::COLOR_BGR2GRAY);
-                double d1 = matchShapes(dst, dst1, CONTOURS_MATCH_I1, 0);
-                cout << "Match: " << matchShapes( dst, dst1, 1, 0) << endl;
-            } 
-
-
-        //}
-        r.sleep();
-    }
-   
-}
-
-void OBJ_DETECTION::recognition() {
-
-
-    while ( !_first_cloud ) {
-        usleep(0.1*1e6);
-    }
-    
-    pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-
-    ros::Rate r(10);    
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<NormalType>::Ptr ds_model_normal (new pcl::PointCloud<NormalType> ());
-    pcl::PointCloud<NormalType>::Ptr model_normal (new pcl::PointCloud<NormalType> ());
-
-    pcl::PointCloud<PointType>::Ptr ds_model (new pcl::PointCloud<PointType> ());
-
-    std::vector < pcl::PointCloud<PointType>::Ptr > ds_models;
-    std::vector < pcl::PointCloud<NormalType>::Ptr > ds_model_normals;
-    ds_models.push_back( ds_model );
-    ds_model_normals.push_back( ds_model_normal );
-
-    pcl::SHOTEstimationOMP<PointType, NormalType, DescriptorType> descr_est;
-    std::vector < pcl::SHOTEstimationOMP<PointType, NormalType, DescriptorType> > descrs_est;
-    descrs_est.push_back( descr_est );
-
-    //temp: carico solo 1 modello:
-    if (pcl::io::loadPCDFile ( "/home/jcacace/dev/ros_ws/src/DIH2/obj_recognition/DATASET/TESTBED/p1.pcd" , *ds_models[0]) < 0) {
-        std::cout << "Error loading model cloud." << std::endl;
-        exit (0);
-    }
-
-    //view processed cloud
-    pcl::visualization::PCLVisualizer viewer ("Dataset p1");
-    viewer.addPointCloud ( ds_models[0], "p1");
-    viewer.spinOnce ();
-
-    //  Compute Normals
-    std::vector < pcl::NormalEstimationOMP<PointType, NormalType> > ds_norms_est;
-    pcl::NormalEstimationOMP<PointType, NormalType> ds_norm_est;
-    std::vector < pcl::UniformSampling<PointType> > uniforms_sampling;
-    pcl::UniformSampling<PointType> uniform_sampling;
-    pcl::PointCloud<PointType>::Ptr ds_model_keypoints (new pcl::PointCloud<PointType> ());
-    std::vector < pcl::PointCloud<PointType>::Ptr > ds_models_keypoints; // (new pcl::PointCloud<PointType> ());
-    pcl::PointCloud<DescriptorType>::Ptr ds_model_descriptors (new pcl::PointCloud<DescriptorType> ());
-    std::vector < pcl::PointCloud<DescriptorType>::Ptr > ds_models_descriptors;
-
-    ds_norms_est.push_back(ds_norm_est);
-    uniforms_sampling.push_back ( uniform_sampling );
-    ds_models_keypoints.push_back( ds_model_keypoints );
-    ds_models_descriptors.push_back( ds_model_descriptors );
-
-    pcl::PointCloud<PointType>::Ptr off_scene_model (new pcl::PointCloud<PointType> ());
-    pcl::PointCloud<PointType>::Ptr off_scene_model_keypoints (new pcl::PointCloud<PointType> ());
-
-    cout << "Objects into the dataset: " << ds_models.size() << endl;
-    for(int i=0; i<ds_models.size(); i++ ) {
-        cout << "Elaborating Object: " << i+1 << endl;
-
-        ds_norms_est[i].setKSearch (10);
-        ds_norms_est[i].setInputCloud (  ds_models[i]  );
-        ds_norms_est[i].compute (*ds_model_normals[i]);
-
-        uniforms_sampling[i].setInputCloud (ds_models[i]);
-        uniforms_sampling[i].setRadiusSearch (_ss);
-        uniforms_sampling[i].filter (*ds_models_keypoints[i] );
-        std::cout << "Scene total points: " << ds_models[i]->size () 
-            << "; Selected Keypoints: " << ds_models_keypoints[i]->size () << std::endl;
-    
-
-        //---Visualize keypoints
-        //  We are translating the model so that it doesn't end in the middle of the scene representation
-        pcl::transformPointCloud (*ds_models_keypoints[i], *off_scene_model, Eigen::Vector3f (-1,0,0), Eigen::Quaternionf (1, 0, 0, 0));
-        pcl::transformPointCloud (*ds_models_keypoints[i], *off_scene_model_keypoints, Eigen::Vector3f (-1,0,0), Eigen::Quaternionf (1, 0, 0, 0));
-        pcl::visualization::PointCloudColorHandlerCustom<PointType> off_scene_model_color_handler (off_scene_model, 255, 255, 128);
-        viewer.addPointCloud (off_scene_model, off_scene_model_color_handler, "off_scene_model");
-        pcl::visualization::PointCloudColorHandlerCustom<PointType> scene_keypoints_color_handler (ds_models_keypoints[i], 0, 0, 255);
-        viewer.addPointCloud (ds_models_keypoints[i], scene_keypoints_color_handler, "scene_keypoints");
-        viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "scene_keypoints");
-        pcl::visualization::PointCloudColorHandlerCustom<PointType> off_scene_model_keypoints_color_handler (off_scene_model_keypoints, 0, 0, 255);
-        viewer.addPointCloud (off_scene_model_keypoints, off_scene_model_keypoints_color_handler, "off_scene_model_keypoints");
-        viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "off_scene_model_keypoints");
-        viewer.spinOnce ();
-        //---
-
-        descrs_est[i].setRadiusSearch  (_descr_rad);
-        descrs_est[i].setInputCloud    (ds_models_keypoints[i]);
-        descrs_est[i].setInputNormals  (ds_model_normals[i] );
-        descrs_est[i].setSearchSurface (ds_models[i]);
-        descrs_est[i].compute          (*ds_models_descriptors[i]);    
-    }
-
-    pcl::KdTreeFLANN<DescriptorType> match_search;
-
-
-    while ( ros::ok() ) {
-        
-        cout << "Press enter!" << endl;
-        string ln;
-        getline(cin, ln);
-
-        pcl::PassThrough<pcl::PointXYZ> pass;
-        pass.setInputCloud (_cloud.makeShared());
-
-        kdtree.setInputCloud (_cloud.makeShared());
-        std::vector<int> nn_indices (1);
-        std::vector<float> nn_dists (1);
-
-        kdtree.nearestKSearch(pcl::PointXYZ(0, 0, 0), 1, nn_indices, nn_dists);
       
-
-        if( !isnan( _cloud.points[nn_indices[0]].x) || !isnan(_cloud.points[nn_indices[0]].y) || !isnan(_cloud.points[nn_indices[0]].z) ) {
-           
-            pass.setFilterFieldName ("z");
-            pass.setFilterLimits (_cloud.points[nn_indices[0]].z - 0.02, _cloud.points[nn_indices[0]].z + 0.02);
-            pass.filter (*cloud_filtered);
-
-
- //view processed cloud
-    pcl::visualization::PCLVisualizer viewer ("cloud filter");
-    viewer.addPointCloud ( cloud_filtered, "p1");
-    viewer.spinOnce ();
-
-
-            /*MATCH HERE!!! 
-            
-                ds_***: oggetti elaborati nel dataset            
-            */
-            pcl::NormalEstimationOMP<PointType, NormalType> norm_est;
-            pcl::PointCloud<NormalType>::Ptr cloud_normals (new pcl::PointCloud<NormalType> ());
-            pcl::UniformSampling<PointType> unisampling;
-            pcl::PointCloud<PointType>::Ptr model_keypoints (new pcl::PointCloud<PointType> ());
-            pcl::PointCloud<DescriptorType>::Ptr model_descriptors (new pcl::PointCloud<DescriptorType> ());
-
-            norm_est.setKSearch (10);
-            norm_est.setInputCloud (cloud_filtered);
-            norm_est.compute (*cloud_normals);
-        
-            unisampling.setInputCloud (cloud_filtered);
-            unisampling.setRadiusSearch (_ss);
-            unisampling.filter (*model_keypoints);
-            std::cout << "Model total points: " << cloud_filtered->size () << "; Selected Keypoints: " << model_keypoints->size () << std::endl;
-
-
-
-
-        pcl::transformPointCloud (*model_keypoints, *off_scene_model, Eigen::Vector3f (-1,0,0), Eigen::Quaternionf (1, 0, 0, 0));
-        pcl::transformPointCloud (*model_keypoints, *off_scene_model_keypoints, Eigen::Vector3f (-1,0,0), Eigen::Quaternionf (1, 0, 0, 0));
-        pcl::visualization::PointCloudColorHandlerCustom<PointType> off_scene_model_color_handler (off_scene_model, 255, 255, 128);
-        viewer.addPointCloud (off_scene_model, off_scene_model_color_handler, "off_scene_model");
-        pcl::visualization::PointCloudColorHandlerCustom<PointType> scene_keypoints_color_handler (model_keypoints, 0, 0, 255);
-        viewer.addPointCloud (model_keypoints, scene_keypoints_color_handler, "scene_keypoints");
-        viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "scene_keypoints");
-        pcl::visualization::PointCloudColorHandlerCustom<PointType> off_scene_model_keypoints_color_handler (off_scene_model_keypoints, 0, 0, 255);
-        viewer.addPointCloud (off_scene_model_keypoints, off_scene_model_keypoints_color_handler, "off_scene_model_keypoints");
-        viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 5, "off_scene_model_keypoints");
-        viewer.spinOnce ();
-
-
-
-
-            pcl::SHOTEstimationOMP<PointType, NormalType, DescriptorType> descriptors_est;
-            descriptors_est.setRadiusSearch (_descr_rad);
-            descriptors_est.setInputCloud (model_keypoints);
-            descriptors_est.setInputNormals (cloud_normals);
-            descriptors_est.setSearchSurface (cloud_filtered);
-            descriptors_est.compute (*model_descriptors);
-
-            match_search.setInputCloud ( model_descriptors );
-
-            for( int m=0; m<ds_models.size(); m++ ) {
-
-
-                pcl::CorrespondencesPtr model_corrs (new pcl::Correspondences ());
-                for (std::size_t i = 0; i < ds_models_descriptors[m]->size(); ++i) {
-                    std::vector<int> neigh_indices (1);
-                    std::vector<float> neigh_sqr_dists (1);
-                    if (!std::isfinite (ds_models_descriptors[m]->at (i).descriptor[0])) //skipping NaNs
-                        continue;
-                    
-                    int found_neighs = match_search.nearestKSearch (ds_models_descriptors[m]->at (i), 1, neigh_indices, neigh_sqr_dists);
-                    if(found_neighs == 1 && neigh_sqr_dists[0] < 0.25f) {
-                        pcl::Correspondence corr (neigh_indices[0], static_cast<int> (i), neigh_sqr_dists[0]);
-                        model_corrs->push_back (corr);
-                    }
-               
-                }
-                std::cout << "Correspondences found: " << model_corrs->size () << std::endl;
-
-
-
-                std::vector<Eigen::Matrix4f, Eigen::aligned_allocator<Eigen::Matrix4f> > rototranslations;
-                std::vector<pcl::Correspondences> clustered_corrs;
-                pcl::PointCloud<RFType>::Ptr model_rf (new pcl::PointCloud<RFType> ());
-                pcl::PointCloud<RFType>::Ptr scene_rf (new pcl::PointCloud<RFType> ());
-
-                pcl::BOARDLocalReferenceFrameEstimation<PointType, NormalType, RFType> rf_est;
-                float rf_rad_ (0.015f);
-                rf_est.setFindHoles (true);
-                rf_est.setRadiusSearch (rf_rad_);
-
-                rf_est.setInputCloud (model_keypoints);
-                rf_est.setInputNormals (cloud_normals);
-                rf_est.setSearchSurface (cloud_filtered);
-                rf_est.compute (*model_rf);
-
-                rf_est.setInputCloud (  ds_models_keypoints[m] ); 
-                rf_est.setInputNormals (  ds_model_normals[m] ); 
-                rf_est.setSearchSurface (  ds_models[m] ); 
-                rf_est.compute (*scene_rf);
-
-
-
-                //  Clustering
-                pcl::Hough3DGrouping<PointType, PointType, RFType, RFType> clusterer;
-                clusterer.setHoughBinSize (_cg_size);
-                clusterer.setHoughThreshold (_cg_thresh);
-                clusterer.setUseInterpolation (true);
-                clusterer.setUseDistanceWeight (false);
-
-                clusterer.setInputCloud (  model_keypoints);
-                clusterer.setInputRf (model_rf);
-                clusterer.setSceneCloud ( ds_models_keypoints[m] );
-                clusterer.setSceneRf (scene_rf);
-                clusterer.setModelSceneCorrespondences (  model_corrs );
-
-                //clusterer.cluster (clustered_corrs);
-                clusterer.recognize (rototranslations, clustered_corrs);
-
-                //
-                //  Output results
-                //
-                std::cout << "Model instances found: " << rototranslations.size () << std::endl;
-                for (std::size_t i = 0; i < rototranslations.size (); ++i)
-                {
-                    std::cout << "\n    Instance " << i + 1 << ":" << std::endl;
-                    std::cout << "        Correspondences belonging to this instance: " << clustered_corrs[i].size () << std::endl;
-
-                    // Print the rotation matrix and translation vector
-                    Eigen::Matrix3f rotation = rototranslations[i].block<3,3>(0, 0);
-                    Eigen::Vector3f translation = rototranslations[i].block<3,1>(0, 3);
-
-                    printf ("\n");
-                    printf ("            | %6.3f %6.3f %6.3f | \n", rotation (0,0), rotation (0,1), rotation (0,2));
-                    printf ("        R = | %6.3f %6.3f %6.3f | \n", rotation (1,0), rotation (1,1), rotation (1,2));
-                    printf ("            | %6.3f %6.3f %6.3f | \n", rotation (2,0), rotation (2,1), rotation (2,2));
-                    printf ("\n");
-                    printf ("        t = < %0.3f, %0.3f, %0.3f >\n", translation (0), translation (1), translation (2));
-                }
-
-
-            }       
-
-
+        double nmin = 0.0;
+        for(int i=0; i<min_dist.size(); i++) {
+            nmin += min_dist[i];
         }
-        r.sleep();
-    }
-}
+        nmin /= min_dist.size();
 
-void OBJ_DETECTION::save_ds () {
+        min_cloud = 0.0;
+        int norma_size = 0;
 
+        for(int i=0; i<min_dist.size(); i++) {
+            if( min_dist[i] <= nmin ) {
+                min_cloud += min_dist[i];
+                norma_size++;
+            } 
+        }
 
-    while ( !_first_cloud ) {
-        usleep(0.1*1e6);
-    }
+        min_cloud /= norma_size;
+        min_found = true;
+
+        mtx.lock();
+        _depth_src.copyTo(depth);
+        mtx.unlock();      
+        Mat img(depth.rows, depth.cols, CV_8UC1, Scalar(0));
+        double z_min = min_cloud;
     
-    pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
-
-    ros::Rate r(10);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_filtered (new pcl::PointCloud<pcl::PointXYZ>);
-
-    string ln;
-    ln = "";
-    while ( ln != "e" ) {      
-        cout << "Save dataset function. Press s to save a new 3d Model, press e to exit" << endl;
-        getline(cin, ln);
-
-        if( ln == "e" ) exit(1);
-
-        pcl::PassThrough<pcl::PointXYZ> pass;
-        pass.setInputCloud (_cloud.makeShared());
-
-        kdtree.setInputCloud (_cloud.makeShared());
-        std::vector<int> nn_indices (1);
-        std::vector<float> nn_dists (1);
-
-        kdtree.nearestKSearch(pcl::PointXYZ(0, 0, 0), 1, nn_indices, nn_dists);
-
-cout << "_cloud.points[nn_indices[0]].z: " << _cloud.points[nn_indices[0]].z << endl;
-
-        if( !isnan( _cloud.points[nn_indices[0]].x) || !isnan(_cloud.points[nn_indices[0]].y) || !isnan(_cloud.points[nn_indices[0]].z) ) {
-            pass.setFilterFieldName ("z");
-            pass.setFilterLimits (_cloud.points[nn_indices[0]].z - 0.02, _cloud.points[nn_indices[0]].z + 0.02);
-            pass.filter (*cloud_filtered);
-
-            //view processed cloud
-            pcl::visualization::PCLVisualizer viewer ("Correspondence Grouping");
-            viewer.addPointCloud (cloud_filtered, "scene_cloud");
-            viewer.spinOnce ();
-
-            cout << "Do you like the acquired model? [Y/n]" << endl;
-            getline(cin, ln);
-            if( ln == "Y" || ln == "" ) {
-                cout << "Insert model name: " << endl;
-                getline(cin, ln);
-                pcl::io::savePCDFileASCII ( _dataset_path + ln + ".pcd"  , *cloud_filtered);
+        mtx.lock();
+        _depth_src.copyTo(depth);
+        cv::Mat contourImage(depth.size(), CV_8UC3, cv::Scalar(0,0,0)); 
+        mtx.unlock();      
+      
+        for(int i=0; i<depth.rows; i++) {
+            for(int j=0; j<depth.cols; j++)  {
+                float d = depth.at<float>(i,j);
+                d*= 0.001;
+                if(  ( ( d ) >=  z_min - 0.03)  && (( d ) <= z_min + 0.03 ) ) {
+                    //cout << i << " - " << j << endl;
+                    img.at<char>(i,j) = 255; //.at<int>(i, j) = 0;
+                }    
             }
         }
-        else 
-            cout << "Error detecting the surface, please, try again"<< endl;
+
+    
+        Mat dilation_dst;
+        int dilation_size = 5;
+        int dilation_type = 1;
+        int dilation_elem = 1;
+        if( dilation_elem == 0 ){ dilation_type = MORPH_RECT; }
+        else if( dilation_elem == 1 ){ dilation_type = MORPH_CROSS; }
+        else if( dilation_elem == 2) { dilation_type = MORPH_ELLIPSE; }
+        Mat element = getStructuringElement( dilation_type,
+                            Size( 2*dilation_size + 1, 2*dilation_size+1 ),
+                            Point( dilation_size, dilation_size ) );
+        dilate( img, dilation_dst, element );
+
+        cv::Mat invSrc =  cv::Scalar::all(255) - dilation_dst;
+        std::vector<std::vector<cv::Point> > contours;
+
+        cv::Mat contourOutput = dilation_dst.clone();
+        cv::findContours( contourOutput, contours, CV_RETR_LIST, CV_CHAIN_APPROX_NONE );
+
+        cv::Scalar colors;
+        colors = cv::Scalar(255, 255, 255);
+        for (size_t idx = 0; idx < contours.size(); idx++) {
+            cv::drawContours(contourImage, contours, idx, colors);
+        }
+
+        cv::imshow("OriginalContours", contourImage);
+        cv::waitKey(100);
+        
+        cout << "Do you like the acquired model? [Y/n]" << endl;
+        getline(cin, ln);
+        if( ln == "Y" || ln == "" ) {
+            cout << "Insert object type: " << endl;
+            getline(cin, ln);
+            
+            int num = 0;  
+            for (const auto & entry : fs::directory_iterator(_dataset_path)) {
+                //std::cout << entry.path() -  _dataset_path << std::endl;
+                string p = entry.path();
+                if ( p.find(ln) != std::string::npos) {
+                    num++;
+                }
+            }
+            imwrite( _dataset_path + ln + "_" + to_string(num) + ".jpg", contourImage);
+            
+            contourImage.release();
+            
+        } 
+        r.sleep();
     }
 }
 
 void OBJ_DETECTION::run() {
 
-       // boost::thread save_ds_t( &OBJ_DETECTION::save_ds, this);
-
-    /*
     if (_save_ds) 
+        boost::thread save_ds_t(&OBJ_DETECTION::save_ds, this );
     else
-        boost::thread recognition_t( &OBJ_DETECTION::recognition, this);
-    */
-
-    boost::thread td2d_t(&OBJ_DETECTION::td2d, this );
-
+        boost::thread td2d_t(&OBJ_DETECTION::td2d, this );
+        
     ros::spin();
 }
 

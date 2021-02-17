@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.0.2)
 project(obj_recognition)
 
 ## Compile as C++11, supported in ROS Kinetic and newer
-add_compile_options(-std=c++14)
+add_compile_options(-std=c++17)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -15,6 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   pcl_ros
   roslib
   cv_bridge
+  message_generation
 )
 #find_package(PCL 1.10 REQUIRED COMPONENTS common io)
 find_package( PCL 1.10 REQUIRED )
@@ -52,11 +53,10 @@ find_package( PCL 1.10 REQUIRED )
 ##   * add every package in MSG_DEP_SET to generate_messages(DEPENDENCIES ...)
 
 ## Generate messages in the 'msg' folder
-# add_message_files(
-#   FILES
-#   Message1.msg
-#   Message2.msg
-# )
+add_message_files(
+  FILES
+  recognized_object.msg
+)
 
 ## Generate services in the 'srv' folder
 # add_service_files(
@@ -73,10 +73,11 @@ find_package( PCL 1.10 REQUIRED )
 # )
 
 ## Generate added messages and services with any dependencies listed here
-# generate_messages(
-#   DEPENDENCIES
-#   geometry_msgs#   sensor_msgs#   std_msgs
-# )
+generate_messages(
+   DEPENDENCIES
+   geometry_msgs
+   std_msgs
+)
 
 ################################################
 ## Declare ROS dynamic reconfigure parameters ##
@@ -144,5 +145,8 @@ target_link_libraries( obj_recognition ${catkin_LIBRARIES} ${PCL_LIBRARIES})
 add_executable(matching src/matching.cpp)
 target_link_libraries( matching ${catkin_LIBRARIES} ${PCL_LIBRARIES} )
 
+
 add_executable(img_obj_recognition src/img_depth_recognition.cpp)
+#add_dependencies(img_obj_recognition img_recognition_generate_messages_cpp) 
+
 target_link_libraries( img_obj_recognition ${catkin_LIBRARIES} ${PCL_LIBRARIES} opencv_highgui)
