@@ -10,6 +10,10 @@ Then, you can install ROS package to support realsense cameras:
 
 	$ sudo apt-get install ros-noetic-realsense2-*
 
+After installed all the requirements, you can compile the package using catkin_make:
+
+	$ roscd && cd ..
+	$ catkin_make
 ### Run the package
 On three different terminals launch the following commands:
 
@@ -48,4 +52,3 @@ The node provides its output using a ROS message of type: obj_recognition/recogn
 ### Limitation
 
 The node is not able to calculate the orientation of the recognized object.
-
