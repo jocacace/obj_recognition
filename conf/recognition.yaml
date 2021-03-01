@@ -3,6 +3,6 @@ depth_topic: /camera/aligned_depth_to_color/image_raw
 info_topic: /camera/aligned_depth_to_color/camera_info
 
 dataset_name: TESTBED
-save_ds: False
+save_ds: True
 
 detection_threshold: 0.02

@@ -43,6 +43,7 @@ using namespace cv;
 
 namespace fs = std::filesystem;
 
+string winname = "recognition";
 class OBJ_DETECTION {
 
     public: 
@@ -341,13 +342,13 @@ void OBJ_DETECTION::td2d() {
         bool _recognition_done = false;
 
         //Wait for a signal?
+        cout << "[Press enter to start recognition process]" << endl;
         string ll;
         getline(cin, ll);
+        destroyAllWindows();
 
-        while( !_recognition_done /*&& !_stop_recognition*/ ) {
-
+        while( !_recognition_done ) {
             if ( !min_found ) {
-            
                 while( min_itr < _s*_camera_frame_rate ) {
                     kdtree.setInputCloud (_cloud.makeShared());
                     std::vector<int> nn_indices (1);
@@ -357,6 +358,8 @@ void OBJ_DETECTION::td2d() {
                     if( !isnan( _cloud.points[nn_indices[0]].z ) ) {
                         min_dist.push_back( _cloud.points[nn_indices[0]].z );
                         min_itr++;
+
+
                     }
                 }
 
@@ -379,8 +382,10 @@ void OBJ_DETECTION::td2d() {
                 min_cloud /= norma_size;
 
                 min_found = true;
+
             } //Searching for the minimum value
-            else cout << "Non cerco piu il min!" << endl;
+            //else cout << "Non cerco piu il min!" << endl;
+
             mtx.lock();
             _depth_src.copyTo(depth);
             mtx.unlock();      
@@ -408,6 +413,8 @@ void OBJ_DETECTION::td2d() {
             for (size_t idx = 0; idx < contours1.size(); idx++) {
                 cv::drawContours(contour1Image, contours1, idx, colors);
             }
+
+
             Mat dst1;
             cvtColor(contour1Image, dst1, cv::COLOR_BGR2GRAY);
 
@@ -481,9 +488,9 @@ void OBJ_DETECTION::td2d() {
                 cy_c1 = (zd_c1) * ( (center_of_rect.y - cy) * fy_inv );
                 cz_c1 = zd_c1;
 
-                cout << "3d Point: (" << cx_c1 << ", " << cy_c1 << ", " << cz_c1 << ")" << endl; 
+                //cout << "3d Point: (" << cx_c1 << ", " << cy_c1 << ", " << cz_c1 << ")" << endl; 
+                //cout << "Pezzo: " << pieces[index] << " - " << scores[index] << endl;
 
-                cout << "Pezzo: " << pieces[index] << " - " << scores[index] << endl;
                 string text = pieces[index] + " (" + to_string(cx_c1) + ", " + to_string(cy_c1) + ", " + to_string( cz_c1 ) + ")";
                 cv::putText(dst1, //target image
                     text, //text
@@ -493,12 +500,19 @@ void OBJ_DETECTION::td2d() {
                     colors, //font color
                     1);
 
-                imshow( "Contours", dst1 );
+                imshow( winname, dst1 );
                 waitKey(100);
-
+                
+                obj_recognition::recognized_object obj;
+                obj.piece.data = pieces[index];
+                obj.center.x = cx_c1;
+                obj.center.y = cy_c1;
+                obj.center.z = cz_c1;
+                _recognized_obj_pub.publish(obj);
+                
                 _recognition_done = true;
-            
             }
+
             cycle_itr++;
             if ( cycle_itr > _cycle_itr_threshold ) {
                 cycle_itr = 0;
@@ -506,8 +520,6 @@ void OBJ_DETECTION::td2d() {
             }
             r.sleep();
         }
-        //r.sleep();
-
     }
 }
 
@@ -541,6 +553,8 @@ void OBJ_DETECTION::save_ds () {
 
         cout << "Save dataset function. Press s to save a new 3d Model, press e to exit" << endl;
         getline(cin, ln);
+        destroyAllWindows();
+
 
         if( ln == "e" ) exit(1);
 
@@ -598,8 +612,7 @@ void OBJ_DETECTION::save_ds () {
                 float d = depth.at<float>(i,j);
                 d*= 0.001;
                 if(  ( ( d ) >=  z_min - 0.03)  && (( d ) <= z_min + 0.03 ) ) {
-                    //cout << i << " - " << j << endl;
-                    img.at<char>(i,j) = 255; //.at<int>(i, j) = 0;
+                    img.at<char>(i,j) = 255; 
                 }    
             }
         }
@@ -628,10 +641,17 @@ void OBJ_DETECTION::save_ds () {
         for (size_t idx = 0; idx < contours.size(); idx++) {
             cv::drawContours(contourImage, contours, idx, colors);
         }
-
+        
         cv::imshow("OriginalContours", contourImage);
         cv::waitKey(100);
-        
+        Moments  M = moments( contours[0] );
+
+        /*
+        cout << "Area: " << M.m00 << endl;
+        //cout << "Momenti: " << M.mu11 << " " << M.mu20 << " " << M.mu02 << endl;
+        cout << "main axies moment: " << (0.5*atanf( (2*M.mu11) / (M.mu20 - M.mu02) ))*180.0/3.1415 << endl;
+        */
+
         cout << "Do you like the acquired model? [Y/n]" << endl;
         getline(cin, ln);
         if( ln == "Y" || ln == "" ) {
